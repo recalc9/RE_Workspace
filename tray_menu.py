@@ -5,37 +5,41 @@ tray_menu.py - 托盘菜单定义与命令转发层
 
 from PIL import Image, ImageDraw
 
+# ------------------- 扁平化配色 -------------------
+# 参考 Material Design / Windows 11 Fluent 的扁平色板
+COLOR_PRIMARY = "#1a73e8"   # 主色（深蓝）
+COLOR_TEXT = "#ffffff"      # 图标文字
+
 # ------------------- 图标生成 -------------------
 
 def _make_icon(color: str, text: str, size: int = 64) -> Image.Image:
-    """生成指定颜色的圆角矩形图标 + 居中文字。"""
+    """生成扁平化图标：纯色方块 + 居中文字（极小圆角，无渐变无阴影）。"""
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # 圆角矩形背景
-    margin = 4
+    # 扁平化：极小圆角（radius=8），纯色填充，无描边无阴影
+    margin = 6
     draw.rounded_rectangle(
         [margin, margin, size - margin - 1, size - margin - 1],
-        radius=12,
+        radius=8,
         fill=color
     )
 
     # 居中文字（注意：textbbox 返回的 (x0, y0, x1, y1) 中的 x0/y0 是字形的左/上 bearing，
     # 必须把它也减掉，否则 CJK 字形（以及任何带 left-side bearing 的字符）会偏左）
-    text_color = "white"
     bbox = draw.textbbox((0, 0), text)
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
     x = (size - tw) // 2 - bbox[0]
     y = (size - th) // 2 - bbox[1]
-    draw.text((x, y), text, fill=text_color)
+    draw.text((x, y), text, fill=COLOR_TEXT)
 
     return img
 
 
 def get_tray_icon() -> Image.Image:
-    """返回主托盘图标：深蓝底 + RE 字样。"""
-    return _make_icon("#1a73e8", "RE", size=64)
+    """返回主托盘图标：深蓝底 + RE 字样（扁平化）。"""
+    return _make_icon(COLOR_PRIMARY, "RE", size=64)
 
 
 # ------------------- 菜单构建 -------------------

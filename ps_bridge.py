@@ -22,8 +22,11 @@ SCRIPT_PATH = BASE_DIR / "re-env.ps1"
 
 # 交互式阻塞命令：这些命令设计上是让用户长时间停留在交互 shell 里，
 # 不应该被 ps_bridge 的默认 30s 超时杀掉（subprocess.TimeoutExpired 会
-# 杀掉 powershell.exe，但容器仍在运行——造成 '看起来失败但其实在跑' 的鬼影）
+# 杀掉 powershell.exe，但容器仍在运行——造成 '看起来失败但其实在跑' 的鬼影）。
+# 但也不能完全不超时——daemon 挂死时永远不返回会让托盘线程永久阻塞。
+# 7200s（2小时）是分析会话的合理上限。
 LONG_RUNNING_COMMANDS = frozenset({"start-linux"})
+LONG_RUNNING_TIMEOUT = 7200  # 秒，long-running 命令的超时上限
 
 DEFAULT_TIMEOUT = 30  # 秒，普通命令的默认超时
 
@@ -41,15 +44,15 @@ def run_ps_command(
         command:    命令名，如 "start-linux", "status"
         sample_path: 可选，样本路径（用于 start-linux）
         isolated:   是否启用隔离模式（传递 -Isolated 开关）
-        timeout:    命令超时秒数；None 表示不超时（用于交互式阻塞命令）
-                    long-running 命令（LONG_RUNNING_COMMANDS）默认传 None
+        timeout:    命令超时秒数；None 表示不超时。
+                    long-running 命令（LONG_RUNNING_COMMANDS）默认用 LONG_RUNNING_TIMEOUT（7200s）
 
     Returns:
         (exit_code, stdout, stderr) 元组
     """
-    # 交互式命令默认不超时（除非调用方显式传入 timeout）
+    # 交互式命令用更长的超时上限（而非 None），避免 daemon 挂死时永久阻塞
     if timeout == DEFAULT_TIMEOUT and command in LONG_RUNNING_COMMANDS:
-        timeout = None
+        timeout = LONG_RUNNING_TIMEOUT
 
     args = [
         "powershell",

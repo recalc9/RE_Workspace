@@ -31,6 +31,20 @@ log = logging.getLogger("RE-Env Tray")
 STATUS_INTERVAL = 4.0     # 距上次 status 调用 >= 此秒数时主动刷新
 TICK_SECONDS = int(STATUS_INTERVAL * 1000)  # tkinter after() 用毫秒
 
+# ------------------- 扁平化主题 -------------------
+# 参考 Material Design / Windows 11 Fluent 的扁平色板
+THEME = {
+    "bg":           "#f5f5f5",  # 窗口背景（浅灰）
+    "panel":        "#ffffff",  # 面板 / 文本框背景
+    "primary":      "#1a73e8",  # 主色（按钮、强调）
+    "primary_hover":"#1557b0",  # 主色 hover
+    "danger":       "#d93025",  # 关闭按钮
+    "danger_hover": "#b3261e",
+    "text":         "#202124",  # 主文字
+    "text_muted":   "#5f6368",  # 次要文字
+    "border":       "#dadce0",  # 边框
+}
+
 # 图标缓存（避免每次 get_tray_icon 都创建新 PIL Image）
 _CACHED_TRAY_ICON = None
 
@@ -41,6 +55,24 @@ def _get_cached_tray_icon():
     if _CACHED_TRAY_ICON is None:
         _CACHED_TRAY_ICON = tray_menu.get_tray_icon()
     return _CACHED_TRAY_ICON
+
+
+def _flat_button(parent, text, command, bg_key="primary", fg="#ffffff"):
+    """创建扁平化按钮：无边框、纯色背景、hover 变色。"""
+    bg = THEME[bg_key]
+    hover_bg = THEME[bg_key + "_hover"]
+    btn = tk.Button(
+        parent, text=text, command=command,
+        relief=tk.FLAT, borderwidth=0, highlightthickness=0,
+        bg=bg, fg=fg,
+        activebackground=hover_bg, activeforeground=fg,
+        padx=18, pady=8,
+        font=("Segoe UI", 10),
+        cursor="hand2",
+    )
+    btn.bind("<Enter>", lambda e: btn.config(bg=hover_bg))
+    btn.bind("<Leave>", lambda e: btn.config(bg=bg))
+    return btn
 
 
 class TrayController:
@@ -88,13 +120,16 @@ class TrayController:
         """
         将命令转发给 ps_bridge 执行，完成后通过 callback 更新托盘。
         callback 会在 tkinter 主线程中执行以更新 UI。
+
+        注意：本方法由 pystray 菜单回调线程调用，不能直接写 self._icon.title
+        （pystray 的 title setter 非线程安全）。必须走 _update_tooltip 的 after() 回主线程。
         """
         def on_done(exit_code, stdout, stderr):
             self._pending.put((cmd, exit_code, stdout, stderr))
             log.info(f"Command '{cmd}' finished (exit={exit_code})")
 
         ps_bridge.run_ps_command_async(cmd, on_done)
-        self._set_tooltip_direct(f"RE-Env  |  {cmd}  执行中...")
+        self._update_tooltip(f"RE-Env  |  {cmd}  执行中...")
 
     # ------------------- 托盘图标更新 -------------------
 
@@ -112,34 +147,42 @@ class TrayController:
     # ------------------- 单一调度循环 -------------------
 
     def _tick(self):
-        """每 TICK_SECONDS 触发一次：先消费队列，再按节拍主动拉 status。"""
+        """每 TICK_SECONDS 触发一次：先消费队列，再按节拍主动拉 status。
+
+        用 try/finally 保证 after() 续命一定执行——即使中间任何一步抛异常
+        （比如 icon 已停止时写 title），也不会让 _tick 循环永久死亡。
+        """
         if not self._running:
             return
 
-        # 1) 消费所有待处理的命令结果
         try:
-            while True:
-                cmd, exit_code, stdout, stderr = self._pending.get_nowait()
-                # 用命令结果反馈到 tooltip，让用户知道执行成功或失败
-                if exit_code == 0:
-                    self._set_tooltip_direct(f"RE-Env  |  {cmd}  ✓")
-                else:
-                    err_msg = stderr.strip()[:30] if stderr else ""
-                    tooltip = f"RE-Env  |  {cmd}  ✗ {err_msg}" if err_msg else f"RE-Env  |  {cmd}  ✗"
-                    self._set_tooltip_direct(tooltip[:127])
-                # 命令完成 → 立即拉一次最新 status 更新 tooltip
+            # 1) 消费所有待处理的命令结果
+            try:
+                while True:
+                    cmd, exit_code, stdout, stderr = self._pending.get_nowait()
+                    # 用命令结果反馈到 tooltip，让用户知道执行成功或失败
+                    if exit_code == 0:
+                        self._set_tooltip_direct(f"RE-Env  |  {cmd}  ✓")
+                    else:
+                        err_msg = (stderr or "").strip()[:30]
+                        tooltip = f"RE-Env  |  {cmd}  ✗ {err_msg}" if err_msg else f"RE-Env  |  {cmd}  ✗"
+                        self._set_tooltip_direct(tooltip[:127])
+                    # 命令完成 → 立即拉一次最新 status 更新 tooltip
+                    self._fetch_status_async()
+                    self._last_status_at = time.monotonic()
+            except queue.Empty:
+                pass
+
+            # 2) 按节拍主动拉 status
+            if time.monotonic() - self._last_status_at >= STATUS_INTERVAL:
                 self._fetch_status_async()
                 self._last_status_at = time.monotonic()
-        except queue.Empty:
-            pass
-
-        # 2) 按节拍主动拉 status
-        if time.monotonic() - self._last_status_at >= STATUS_INTERVAL:
-            self._fetch_status_async()
-            self._last_status_at = time.monotonic()
-
-        # 3) 续命
-        self._tk_root.after(TICK_SECONDS, self._tick)
+        except Exception as e:
+            log.warning(f"_tick 异常（已吞掉以保证循环续命）: {e}")
+        finally:
+            # 3) 续命——无论上面是否抛异常，都要 schedule 下一次 tick
+            if self._running:
+                self._tk_root.after(TICK_SECONDS, self._tick)
 
     def _fetch_status_async(self):
         """后台拉取 status 并在主线程上更新 tooltip（带并发保护）。"""
@@ -186,12 +229,30 @@ class TrayController:
 
         win = tk.Toplevel(self._tk_root)
         win.title("RE-Env  环境状态")
-        win.geometry("600x400")
+        win.geometry("640x460")
+        win.configure(bg=THEME["bg"])
+        # 内容区域统一 padding
+        content = tk.Frame(win, bg=THEME["bg"])
+        content.pack(fill=tk.BOTH, expand=True, padx=16, pady=12)
 
-        tk.Label(win, text="环境状态", font=("Segoe UI", 12, "bold")).pack(pady=8)
+        # 标题
+        tk.Label(
+            content, text="环境状态", font=("Segoe UI", 14, "bold"),
+            bg=THEME["bg"], fg=THEME["text"], anchor="w"
+        ).pack(fill=tk.X, pady=(0, 10))
 
-        text = scrolledtext.ScrolledText(win, wrap=tk.WORD, font=("Consolas", 10))
-        text.pack(fill=tk.BOTH, expand=True, padx=8, pady=4)
+        # 文本框：用 Frame 包装提供 1px 扁平边框
+        text_frame = tk.Frame(content, bg=THEME["border"], highlightthickness=0)
+        text_frame.pack(fill=tk.BOTH, expand=True)
+        text = scrolledtext.ScrolledText(
+            text_frame, wrap=tk.WORD, font=("Consolas", 10),
+            relief=tk.FLAT, borderwidth=0,
+            bg=THEME["panel"], fg=THEME["text"],
+            insertbackground=THEME["text"],
+            padx=10, pady=8,
+            highlightthickness=0,
+        )
+        text.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
 
         # 加载当前状态（带 fetch token 防止窗口关闭后 TclError）
         self._fetch_token += 1
@@ -221,16 +282,17 @@ class TrayController:
 
         threading.Thread(target=lambda: fetch_and_display(token), daemon=True).start()
 
-        btn_frame = tk.Frame(win)
-        btn_frame.pack(fill=tk.X, padx=8, pady=6)
+        # 按钮栏（扁平化）
+        btn_frame = tk.Frame(content, bg=THEME["bg"])
+        btn_frame.pack(fill=tk.X, pady=(10, 0))
 
         def close_and_clear():
             # 销毁时显式清空引用，避免下次打开时 winfo_exists() 兜底逻辑生效
             self._log_window = None
             win.destroy()
 
-        tk.Button(btn_frame, text="刷新", command=refresh_async).pack(side=tk.LEFT)
-        tk.Button(btn_frame, text="关闭", command=close_and_clear).pack(side=tk.RIGHT)
+        _flat_button(btn_frame, "刷新", refresh_async, bg_key="primary").pack(side=tk.LEFT)
+        _flat_button(btn_frame, "关闭", close_and_clear, bg_key="danger").pack(side=tk.RIGHT)
 
         self._log_window = win
         win.protocol("WM_DELETE_WINDOW", win.withdraw)  # 关闭时隐藏而非销毁
@@ -260,8 +322,11 @@ if __name__ == "__main__":
         _pyw = _os.path.join(_os.path.dirname(sys.executable), "pythonw.exe")
         if _os.path.exists(_pyw):
             print("RE-Env 托盘即将在后台启动… 如需关闭请右键托盘图标点「❌ 退出」。")
-            _os.execv(_pyw, [_pyw] + sys.argv)
-            # execv 替换当前进程，下面的代码不会执行
+            try:
+                _os.execv(_pyw, [_pyw] + sys.argv)
+                # execv 成功时不返回；下面的代码只在 execv 抛异常时执行
+            except OSError as e:
+                print(f"[*] 切换到 pythonw.exe 失败（{e}），改用当前进程继续。")
         else:
             print("RE-Env 托盘已启动（当前终端被 tkinter 占用属正常现象）。")
             print("提示：下次用 pythonw tray_app.py 启动就不会卡终端了。")

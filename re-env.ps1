@@ -382,6 +382,9 @@ switch ($Command) {
         if ($vmState -match 'VMState="saved"') {
             Write-Log "[*] 快照为已保存态，丢弃保存态以冷启动..." "Yellow"
             & $Config.VBoxManagePath discardstate $Config.VboxVMName *> $null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Log "[!] discardstate 失败（exit=$LASTEXITCODE），startvm 可能从休眠唤醒而非冷启动" "Red"
+            }
         }
 
         Write-Log "[+] Starting VM..." "Green"
@@ -408,6 +411,10 @@ switch ($Command) {
         if ($vmState -match 'VMState="saved"') {
             Write-Log "[*] 快照恢复后为已保存态，丢弃以彻底关机..." "Yellow"
             & $Config.VBoxManagePath discardstate $Config.VboxVMName *> $null
+            # 校验 discardstate 是否真的生效（.sav 文件被锁等情况会失败）
+            if ($LASTEXITCODE -ne 0) {
+                Write-Log "[!] discardstate 失败（exit=$LASTEXITCODE），VM 可能仍处于 saved 态" "Red"
+            }
         }
 
         Write-Log "[+] Reset complete" "Cyan"
@@ -486,7 +493,14 @@ switch ($Command) {
         $null = $sb.AppendLine("Workspace: $($Config.Workspace)")
         $null = $sb.AppendLine()
         $null = $sb.AppendLine("[Linux Container]")
-        $c = & $Engine ps -a --filter "name=$($Config.ContainerName)" --format "{{.Status}}" 2>$null
+        # docker/podman 的 name 过滤是子串匹配，可能命中多个容器（如 remnux_analysis + remnux_analysis_old）。
+        # 用 Where-Object 精确匹配容器名，只取本脚本管理的那个。
+        $names = & $Engine ps -a --filter "name=$($Config.ContainerName)" --format "{{.Names}}" 2>$null
+        $exactName = $names | Where-Object { $_ -eq $Config.ContainerName } | Select-Object -First 1
+        $c = $null
+        if ($exactName) {
+            $c = & $Engine ps -a --filter "name=^$($Config.ContainerName)$" --format "{{.Status}}" 2>$null
+        }
         $line = if ($c) { $c } else { "Not running" }
         $null = $sb.AppendLine($line)
         $null = $sb.AppendLine()
