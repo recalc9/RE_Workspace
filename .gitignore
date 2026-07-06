@@ -1,0 +1,27 @@
+# 运行时产物
+.re-env.log
+.inetsim_ip
+.engine
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 分析产物（保留目录占位 .gitkeep）
+output/*
+!output/.gitkeep
+inbox/*
+!inbox/.gitkeep
+ghidra_projects/*
+!ghidra_projects/.gitkeep
+linux_targets/*
+!linux_targets/.gitkeep
+windows_targets/*
+!windows_targets/.gitkeep
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
