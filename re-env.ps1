@@ -492,28 +492,39 @@ switch ($Command) {
 
     # --- 优雅关闭 Windows 虚拟机 ---
     "stop-win" {
-        Write-Log "[-] Gracefully shutting down VM..." "Yellow"
-        # acpipowerbutton 相当于按一下电源键，触发 VM 内的正常关机流程
-        # 区别于 reset-win 的 poweroff（强制断电），这个会让 OS 正常 flush 并关机
+        Write-Log "[-] Stopping VM..." "Yellow"
+
+        # 先尝试 ACPI 优雅关机（相当于按电源键）。
+        # 注意：Windows 10 VM 有时不响应 ACPI（电源按钮设成睡眠/锁屏状态等），
+        # 所以不能只靠它——后面有 savestate 兜底。
         & $Config.VBoxManagePath controlvm $Config.VboxVMName acpipowerbutton *> $null
         if ($LASTEXITCODE -ne 0) {
-            Write-Log "[!] ACPI 关机失败（exit=$LASTEXITCODE），VM 可能未运行" "Red"
+            Write-Log "[!] ACPI 信号发送失败（exit=$LASTEXITCODE），VM 可能未运行" "Red"
             return
         }
-        Write-Log "[+] VM 关机指令已发送，等待 OS 正常关闭..." "Green"
 
-        # 轮询等待 VM 进入 poweroff（ACPI 关机是异步的，通常 10-30s）
-        # 避免用户紧接着 start-win 时 snapshot restore 对运行中 VM 失败
-        $deadline = (Get-Date).AddSeconds(60)
+        # 等 15s 看 VM 是否响应 ACPI 关机
+        $deadline = (Get-Date).AddSeconds(15)
+        $st = $null
         while ((Get-Date) -lt $deadline) {
             $st = & $Config.VBoxManagePath showvminfo $Config.VboxVMName --machinereadable 2>$null
             if ($st -match 'VMState="(poweroff|aborted)"') { break }
             Start-Sleep 2
         }
+
         if ($st -match 'VMState="(poweroff|aborted)"') {
-            Write-Log "[+] VM 已关闭" "Green"
+            Write-Log "[+] VM 已通过 ACPI 关闭" "Green"
         } else {
-            Write-Log "[!] VM 60s 内未完成关机，可能需要手动 reset-win" "Yellow"
+            # ACPI 未生效（Windows 电源设置/锁屏等），fallback 到 savestate
+            # savestate 保存 VM 状态到磁盘并释放资源，立即生效，不依赖 VM 内 OS。
+            # 下次 start-win 会 restore 快照丢弃此 saved 态，等价于干净关机。
+            Write-Log "[*] ACPI 未生效，改用 savestate 保存状态..." "Yellow"
+            & $Config.VBoxManagePath controlvm $Config.VboxVMName savestate *> $null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Log "[+] VM 已保存状态（saved），资源已释放" "Green"
+            } else {
+                Write-Log "[!] savestate 也失败（exit=$LASTEXITCODE），请用 reset-win 强制重置" "Red"
+            }
         }
     }
 
