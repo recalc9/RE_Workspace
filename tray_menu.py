@@ -53,10 +53,10 @@ def build_menu(ctrl):
     """
     import pystray
 
-    def menu_item(label, cmd=None, cb=None):
-        """生成普通菜单项，cmd 为命令字符串，cb 为回调。"""
+    def menu_item(label, cmd=None, cb=None, isolated=False):
+        """生成普通菜单项，cmd 为命令字符串，cb 为回调，isolated 传 -Isolated 开关。"""
         if cmd:
-            return pystray.MenuItem(label, lambda i, k: ctrl.do_command(cmd, cb))
+            return pystray.MenuItem(label, lambda i, k: ctrl.do_command(cmd, cb, isolated=isolated))
         else:
             return pystray.Menu.SEPARATOR
 
@@ -64,11 +64,13 @@ def build_menu(ctrl):
         pystray.MenuItem("RE-Env  控制台", lambda i, k: None, enabled=False),
 
         menu_item("▶  启动 Linux (REMnux)",    "start-linux"),
+        menu_item("🛡️  启动 Linux (隔离)",      "start-linux", isolated=True),
         menu_item("⏸  停止 Linux",             "stop-linux"),
 
         pystray.Menu.SEPARATOR,
 
         menu_item("▶  启动 Windows VM",        "start-win"),
+        menu_item("🛡️  启动 Windows VM (隔离)", "start-win", isolated=True),
         menu_item("⏸  停止 Windows VM",        "stop-win"),
         menu_item("🔄  重置 Windows VM",        "reset-win"),
 

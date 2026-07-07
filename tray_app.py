@@ -116,20 +116,22 @@ class TrayController:
 
     # ------------------- 命令执行 -------------------
 
-    def do_command(self, cmd: str, callback=None):
+    def do_command(self, cmd: str, callback=None, isolated=False):
         """
         将命令转发给 ps_bridge 执行，完成后通过 callback 更新托盘。
         callback 会在 tkinter 主线程中执行以更新 UI。
 
         注意：本方法由 pystray 菜单回调线程调用，不能直接写 self._icon.title
         （pystray 的 title setter 非线程安全）。必须走 _update_tooltip 的 after() 回主线程。
+        isolated=True 时传 -Isolated 开关（用于 start-linux / start-win 隔离模式）。
         """
         def on_done(exit_code, stdout, stderr):
             self._pending.put((cmd, exit_code, stdout, stderr))
             log.info(f"Command '{cmd}' finished (exit={exit_code})")
 
-        ps_bridge.run_ps_command_async(cmd, on_done)
-        self._update_tooltip(f"RE-Env  |  {cmd}  执行中...")
+        ps_bridge.run_ps_command_async(cmd, on_done, isolated=isolated)
+        tag = " (隔离)" if isolated else ""
+        self._update_tooltip(f"RE-Env  |  {cmd}{tag}  执行中...")
 
     # ------------------- 托盘图标更新 -------------------
 

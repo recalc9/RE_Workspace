@@ -27,6 +27,9 @@
     # 恢复 Clean_Base 快照后启动 Windows10 VM
     .\re-env.ps1 start-win
 
+    # VM 隔离模式：断网 + 禁剪贴板/拖拽 + 共享只读
+    .\re-env.ps1 start-win -Isolated
+
     # 优雅关闭 Windows VM（ACPI 关机）
     .\re-env.ps1 stop-win
 
@@ -56,9 +59,11 @@
     stop-linux
         停止并强制销毁 remnux_analysis 容器（docker/podman stop + rm -f）。
 
-    start-win
+    start-win [-Isolated]
         恢复 VirtualBox 快照 Clean_Base 后以 GUI 模式启动 Windows10 虚拟机。
         每次启动前都会恢复快照，确保干净分析环境。自动挂载共享文件夹。
+        -Isolated 启用 VM 侧隔离：断网(--nic1 none) + 禁用剪贴板/拖拽 + 共享文件夹只读，
+        防止恶意样本通过网络或共享逃逸到宿主机。
 
     stop-win
         向 VM 发送 ACPI 关机信号，触发 OS 正常关机流程。
@@ -446,6 +451,18 @@ switch ($Command) {
             }
         }
 
+        # Isolated 模式：VM 侧加固（与容器侧 -Isolated 语义对等）。
+        # modifyvm 必须在 VM poweroff 时执行——restore+discardstate 后正是 poweroff。
+        # 注意：snapshot restore 已把 VM 配置恢复到 Clean_Base，所以非隔离模式不需要额外恢复网络。
+        if ($Isolated) {
+            Write-Log "[*] VM 隔离模式：断网 + 禁用剪贴板/拖拽 + 共享文件夹只读" "Cyan"
+            & $Config.VBoxManagePath modifyvm $Config.VboxVMName `
+                --nic1 none --clipboard disabled --draganddrop disabled *> $null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Log "[!] VM 隔离配置失败（exit=$LASTEXITCODE）" "Red"
+            }
+        }
+
         Write-Log "[+] Starting VM..." "Green"
         # 以 GUI 模式启动虚拟机
         & $Config.VBoxManagePath startvm $Config.VboxVMName --type gui
@@ -453,6 +470,7 @@ switch ($Command) {
         # 挂载 transient 共享文件夹（VM 运行时加，关机后自动消失，符合"阅后即焚"语义）。
         # VM 内需装 VirtualBox Guest Additions，--automount 会自动挂载到可用盘符（通常 Z:、Y:）。
         # 若没装 Guest Additions，可在 VM 内手动执行：net use Z: \\vboxsvr\re-env-targets
+        # Isolated 模式下加 --readonly：VM 内只能读不能写，防止恶意样本通过共享回写宿主机
         $shares = @(
             @{ Name = "re-env-targets"; Path = (Join-Path $Config.Workspace "windows_targets") },
             @{ Name = "re-env-output";  Path = (Join-Path $Config.Workspace "output") }
@@ -460,10 +478,12 @@ switch ($Command) {
         foreach ($s in $shares) {
             # 确保宿主机目录存在
             if (-not (Test-Path $s.Path)) { New-Item -ItemType Directory -Path $s.Path -Force | Out-Null }
-            & $Config.VBoxManagePath sharedfolder add $Config.VboxVMName `
-                --name $s.Name --hostpath $s.Path --transient --automount *> $null
+            $shareArgs = @("--name", $s.Name, "--hostpath", $s.Path, "--transient", "--automount")
+            if ($Isolated) { $shareArgs += "--readonly" }
+            & $Config.VBoxManagePath sharedfolder add $Config.VboxVMName @shareArgs *> $null
             if ($LASTEXITCODE -eq 0) {
-                Write-Log "[+] 共享文件夹已挂载: $($s.Name) -> $($s.Path)" "Green"
+                $roTag = if ($Isolated) { " (只读)" } else { "" }
+                Write-Log "[+] 共享文件夹已挂载: $($s.Name) -> $($s.Path)$roTag" "Green"
             } else {
                 Write-Log "[!] 共享文件夹 $($s.Name) 挂载失败（exit=$LASTEXITCODE），请确认 VM 已启动" "Red"
             }

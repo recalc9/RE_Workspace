@@ -29,7 +29,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```powershell
 .\re-env.ps1 start-linux              # 启动 REMnux 容器（交互式）
-.\re-env.ps1 start-linux -Isolated    # 隔离模式：--network=none --cap-drop=ALL --security-opt=no-new-privileges
+.\re-env.ps1 start-linux -Isolated    # 容器隔离：--network=none --cap-drop=ALL --security-opt=no-new-privileges --memory=2g --cpus=2，output 挂 :ro
+.\re-env.ps1 start-win -Isolated      # VM 隔离：--nic1 none + 禁用剪贴板/拖拽 + 共享文件夹 --readonly
 .\re-env.ps1 start-linux .\bin\evil.exe   # 第二参数作为样本路径，会回显到日志与容器内 /home/remnux/malware/
 .\re-env.ps1 stop-linux                # 销毁容器
 .\re-env.ps1 start-win                 # 恢复 Clean_Base 快照后启动 VM
