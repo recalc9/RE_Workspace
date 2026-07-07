@@ -27,6 +27,9 @@
     # 恢复 Clean_Base 快照后启动 Windows10 VM
     .\re-env.ps1 start-win
 
+    # 优雅关闭 Windows VM（ACPI 关机）
+    .\re-env.ps1 stop-win
+
     # 强制断电 + 恢复快照（无条件重置）
     .\re-env.ps1 reset-win
 
@@ -55,7 +58,11 @@
 
     start-win
         恢复 VirtualBox 快照 Clean_Base 后以 GUI 模式启动 Windows10 虚拟机。
-        每次启动前都会恢复快照，确保干净分析环境。
+        每次启动前都会恢复快照，确保干净分析环境。自动挂载共享文件夹。
+
+    stop-win
+        向 VM 发送 ACPI 关机信号，触发 OS 正常关机流程。
+        区别于 reset-win 的强制断电，这个会让 OS 正常 flush 并关闭。
 
     reset-win
         强制断电虚拟机（poweroff），等待 3 秒后恢复 Clean_Base 快照。
@@ -98,7 +105,7 @@
 param(
     # 必填参数：指定要执行的命令，使用 ValidateSet 限制只能输入指定的几个字符串，防止误操作
     [Parameter(Mandatory=$true, Position=0)]
-    [ValidateSet("start-linux", "stop-linux", "start-win", "reset-win", "start-sim", "stop-sim", "status", "help")]
+    [ValidateSet("start-linux", "stop-linux", "start-win", "stop-win", "reset-win", "start-sim", "stop-sim", "status", "help")]
     [string]$Command,
 
     # 可选参数：指定要分析的样本路径（主要用于 start-linux 时传递样本名）
@@ -130,6 +137,10 @@ $Config = @{
 # 全局共享的无 BOM UTF-8 编码器，避免每次 Write-Log 都 new 一个对象
 $Script:Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 
+# 日志轮转阈值：单文件超过 5MB 时滚动，保留 3 份历史（.1/.2/.3）
+$Script:LogMaxBytes = 5MB
+$Script:LogKeepCount = 3
+
 function Write-Log {
     param(
         [string]$Message,                            # 日志内容
@@ -139,9 +150,35 @@ function Write-Log {
     # 获取当前时间戳并格式化
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
+    $line = "$timestamp | $Message"
+
+    # 轮转检查：文件超过阈值时滚动（.log → .1 → .2 → .3，最老的丢弃）
+    # 用 try/catch 包住，轮转失败不能影响日志写入本身
+    try {
+        if (Test-Path $Config.LogFile) {
+            $size = (Get-Item $Config.LogFile).Length
+            if ($size -ge $Script:LogMaxBytes) {
+                # 从最老的开始删，逐个重命名上移
+                for ($i = $Script:LogKeepCount; $i -ge 1; $i--) {
+                    $cur = "$($Config.LogFile).$i"
+                    if ($i -eq $Script:LogKeepCount) {
+                        if (Test-Path $cur) { Remove-Item $cur -Force }
+                    } else {
+                        $prev = "$($Config.LogFile).$i"
+                        $next = "$($Config.LogFile).$($i + 1)"
+                        if (Test-Path $prev) { Move-Item $prev -Destination $next -Force }
+                    }
+                }
+                Move-Item $Config.LogFile -Destination "$($Config.LogFile).1" -Force
+            }
+        }
+    } catch {
+        # 轮转失败不影响主流程，但提示一下
+        Write-Host "[!] 日志轮转失败: $_" -ForegroundColor Yellow
+    }
+
     # 用 AppendAllText 以 UTF-8 无 BOM 追加写入。
     # 注意：不要用 Add-Content -Encoding UTF8（PS 5.1 默认带 BOM，且重复追加时会改写文件头导致乱码）
-    $line = "$timestamp | $Message"
     [System.IO.File]::AppendAllText($Config.LogFile, $line + [Environment]::NewLine, $Script:Utf8NoBom)
     Write-Host $Message -ForegroundColor $Color
 }
@@ -333,9 +370,19 @@ switch ($Command) {
 
         # 如果用户传入了 -Isolated 开关，启用最高级别的安全隔离
         if ($Isolated) {
+            # output 改只读挂载，防止恶意样本通过产物目录回写宿主机（host escape）
+            # Podman 的 :Z 标签若已追加，用逗号组合成 :Z,ro；否则直接 :ro
+            if ($mounts[3] -match ':Z$') {
+                $mounts[3] += ',ro'
+            } else {
+                $mounts[3] += ':ro'
+            }
             $extra += "--network=none"                  # 彻底断开容器网络
             $extra += "--cap-drop=ALL"                  # 丢弃所有 Linux 特权能力
             $extra += "--security-opt=no-new-privileges" # 禁止进程通过 execve 获取新特权
+            $extra += "--memory=2g"                     # 限制内存，防止样本耗尽宿主机
+            $extra += "--cpus=2"                        # 限制 CPU
+            Write-Log "[*] 隔离模式：output 只读 + 资源限制(2g/2cpu)" "Cyan"
         } elseif (Test-Path $Config.INetSimIPFile) {
             # INetSim 联动：非隔离模式下，将容器 DNS 指向 INetSim
             $simIP = Get-Content $Config.INetSimIPFile -Raw
@@ -411,6 +458,19 @@ switch ($Command) {
         }
     }
 
+    # --- 优雅关闭 Windows 虚拟机 ---
+    "stop-win" {
+        Write-Log "[-] Gracefully shutting down VM..." "Yellow"
+        # acpipowerbutton 相当于按一下电源键，触发 VM 内的正常关机流程
+        # 区别于 reset-win 的 poweroff（强制断电），这个会让 OS 正常 flush 并关机
+        & $Config.VBoxManagePath controlvm $Config.VboxVMName acpipowerbutton *> $null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Log "[!] ACPI 关机失败（exit=$LASTEXITCODE），VM 可能未运行" "Red"
+        } else {
+            Write-Log "[+] VM 关机指令已发送，等待 OS 正常关闭" "Green"
+        }
+    }
+
     # --- 重置 Windows 虚拟机 ---
     "reset-win" {
         Write-Log "[!] Powering off VM..." "Red"
@@ -441,6 +501,25 @@ switch ($Command) {
 
     # --- 启动 INetSim 网络模拟 ---
     "start-sim" {
+        # 端口冲突预检：INetSim 会占用一组常用端口，若宿主机已被占用则 docker run 会失败
+        # 提前检测并友好报错，而不是让错误被 *> $null 吞掉
+        $simPorts = @(53, 80, 443, 25, 110, 143, 993, 995, 3306, 5432)
+        $conflicts = @()
+        foreach ($port in $simPorts) {
+            # Get-NetTCPConnection 在 PS 5.1 可用；检查 LocalPort 是否被监听
+            $busy = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+            if ($busy) {
+                # 排除 INetSim 自己（如果已在运行）
+                $ownProc = ($busy | Where-Object { $_.OwningProcess -eq $PID }).Count -eq $busy.Count
+                if (-not $ownProc) { $conflicts += $port }
+            }
+        }
+        if ($conflicts.Count -gt 0) {
+            Write-Log "[!] 端口被占用，无法启动 INetSim: $($conflicts -join ', ')" "Red"
+            Write-Log "[*] 请先释放这些端口，或先运行 stop-sim / stop-linux" "Yellow"
+            return
+        }
+
         # 创建 Docker 网络（如果不存在）
         # 捕获 stdout 用 2>$null（若已存在 network ls 会返回名字，create 不需要 stdout）
         $netExists = & $Engine network ls --filter "name=$($Config.INetSimNetwork)" --format "{{.Name}}" 2>$null

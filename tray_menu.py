@@ -69,6 +69,7 @@ def build_menu(ctrl):
         pystray.Menu.SEPARATOR,
 
         menu_item("▶  启动 Windows VM",        "start-win"),
+        menu_item("⏸  停止 Windows VM",        "stop-win"),
         menu_item("🔄  重置 Windows VM",        "reset-win"),
 
         pystray.Menu.SEPARATOR,

@@ -19,7 +19,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | 分析面 | REMnux 容器 + Win10 VM | 静态分析、动态调试、行为监控 |
 | 数据面 | `D:\security\RE_Workspace` | 宿主机与分析环境之间安全的样本/产物穿透 |
 
-控制面暴露的 7 个命令（`ValidateSet` 已锁定，不允许扩展）：`start-linux` / `stop-linux` / `start-win` / `reset-win` / `start-sim` / `stop-sim` / `status`。
+控制面暴露的 8 个命令（`ValidateSet` 已锁定，扩命令时 `#Requires` 与 ValidateSet 双层保护都要更新）：`start-linux` / `stop-linux` / `start-win` / `stop-win` / `reset-win` / `start-sim` / `stop-sim` / `status`。
 
 ## 常用命令
 
