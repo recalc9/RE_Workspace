@@ -1,5 +1,6 @@
 # 运行时产物
 .re-env.log
+.re-env.log.*
 .inetsim_ip
 .engine
 

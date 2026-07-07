@@ -179,7 +179,13 @@ function Write-Log {
 
     # 用 AppendAllText 以 UTF-8 无 BOM 追加写入。
     # 注意：不要用 Add-Content -Encoding UTF8（PS 5.1 默认带 BOM，且重复追加时会改写文件头导致乱码）
-    [System.IO.File]::AppendAllText($Config.LogFile, $line + [Environment]::NewLine, $Script:Utf8NoBom)
+    # 包 try/catch：多进程并发写日志或轮转期间文件被锁时，AppendAllText 会抛 IOException，
+    # 不能让日志写入失败中断主命令流程
+    try {
+        [System.IO.File]::AppendAllText($Config.LogFile, $line + [Environment]::NewLine, $Script:Utf8NoBom)
+    } catch {
+        Write-Host "[!] 日志写入失败（可能并发冲突）: $_" -ForegroundColor Yellow
+    }
     Write-Host $Message -ForegroundColor $Color
 }
 
@@ -352,12 +358,13 @@ switch ($Command) {
         $target = Join-Path $Config.Workspace "linux_targets"
         $output = Join-Path $Config.Workspace "output"
 
-        # 构建挂载参数数组 (-v) 和端口映射 (-p)
+        # 构建挂载参数数组 (-v)。端口映射 (-p) 单独放 $ports，因为 Isolated 模式下
+        # --network=none 与 -p 互斥（Docker 会报 "conflicting options: port publishing and network mode none"）
         $mounts = @(
             "-v", "${target}:/home/remnux/malware",
-            "-v", "${output}:/home/remnux/output",
-            "-p", "$($Config.GdbPort):9999"
+            "-v", "${output}:/home/remnux/output"
         )
+        $ports = @("-p", "$($Config.GdbPort):9999")
 
         $extra = @() # 用于存放额外的安全/环境参数
 
@@ -377,12 +384,12 @@ switch ($Command) {
             } else {
                 $mounts[3] += ':ro'
             }
-            $extra += "--network=none"                  # 彻底断开容器网络
+            $extra += "--network=none"                  # 彻底断开容器网络（与 -p 互斥，故不加 $ports）
             $extra += "--cap-drop=ALL"                  # 丢弃所有 Linux 特权能力
             $extra += "--security-opt=no-new-privileges" # 禁止进程通过 execve 获取新特权
             $extra += "--memory=2g"                     # 限制内存，防止样本耗尽宿主机
             $extra += "--cpus=2"                        # 限制 CPU
-            Write-Log "[*] 隔离模式：output 只读 + 资源限制(2g/2cpu)" "Cyan"
+            Write-Log "[*] 隔离模式：output 只读 + 资源限制(2g/2cpu)，无端口映射" "Cyan"
         } elseif (Test-Path $Config.INetSimIPFile) {
             # INetSim 联动：非隔离模式下，将容器 DNS 指向 INetSim
             $simIP = Get-Content $Config.INetSimIPFile -Raw
@@ -396,6 +403,11 @@ switch ($Command) {
                     Write-Log "[!] .inetsim_ip 内容不是合法 IP（$simIP），跳过 INetSim 联动" "Yellow"
                 }
             }
+        }
+
+        # 非隔离模式才追加端口映射（Isolated 下 --network=none 与 -p 互斥）
+        if (-not $Isolated) {
+            $mounts += $ports
         }
 
         Write-Log "[+] Starting REMnUX container..." "Green"
@@ -466,8 +478,22 @@ switch ($Command) {
         & $Config.VBoxManagePath controlvm $Config.VboxVMName acpipowerbutton *> $null
         if ($LASTEXITCODE -ne 0) {
             Write-Log "[!] ACPI 关机失败（exit=$LASTEXITCODE），VM 可能未运行" "Red"
+            return
+        }
+        Write-Log "[+] VM 关机指令已发送，等待 OS 正常关闭..." "Green"
+
+        # 轮询等待 VM 进入 poweroff（ACPI 关机是异步的，通常 10-30s）
+        # 避免用户紧接着 start-win 时 snapshot restore 对运行中 VM 失败
+        $deadline = (Get-Date).AddSeconds(60)
+        while ((Get-Date) -lt $deadline) {
+            $st = & $Config.VBoxManagePath showvminfo $Config.VboxVMName --machinereadable 2>$null
+            if ($st -match 'VMState="(poweroff|aborted)"') { break }
+            Start-Sleep 2
+        }
+        if ($st -match 'VMState="(poweroff|aborted)"') {
+            Write-Log "[+] VM 已关闭" "Green"
         } else {
-            Write-Log "[+] VM 关机指令已发送，等待 OS 正常关闭" "Green"
+            Write-Log "[!] VM 60s 内未完成关机，可能需要手动 reset-win" "Yellow"
         }
     }
 
@@ -503,17 +529,21 @@ switch ($Command) {
     "start-sim" {
         # 端口冲突预检：INetSim 会占用一组常用端口，若宿主机已被占用则 docker run 会失败
         # 提前检测并友好报错，而不是让错误被 *> $null 吞掉
-        $simPorts = @(53, 80, 443, 25, 110, 143, 993, 995, 3306, 5432)
+        $simTcpPorts = @(53, 80, 443, 25, 110, 143, 993, 995, 3306, 5432)
+        $simUdpPorts = @(53, 25)  # INetSim 还映射了 53/udp 和 25/udp
         $conflicts = @()
-        foreach ($port in $simPorts) {
-            # Get-NetTCPConnection 在 PS 5.1 可用；检查 LocalPort 是否被监听
+
+        # TCP 检测
+        foreach ($port in $simTcpPorts) {
             $busy = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
-            if ($busy) {
-                # 排除 INetSim 自己（如果已在运行）
-                $ownProc = ($busy | Where-Object { $_.OwningProcess -eq $PID }).Count -eq $busy.Count
-                if (-not $ownProc) { $conflicts += $port }
-            }
+            if ($busy) { $conflicts += "$port/tcp" }
         }
+        # UDP 检测（Get-NetUDPEndpoint 在 Win10/11 PS 5.1 可用）
+        foreach ($port in $simUdpPorts) {
+            $busy = Get-NetUDPEndpoint -LocalPort $port -ErrorAction SilentlyContinue
+            if ($busy) { $conflicts += "$port/udp" }
+        }
+
         if ($conflicts.Count -gt 0) {
             Write-Log "[!] 端口被占用，无法启动 INetSim: $($conflicts -join ', ')" "Red"
             Write-Log "[*] 请先释放这些端口，或先运行 stop-sim / stop-linux" "Yellow"
