@@ -471,8 +471,10 @@ switch ($Command) {
 
             $running = (& $Engine inspect $Config.INetSimName --format "{{.State.Running}}" 2>$null)
             if ($running -and $running.Trim() -eq "true") {
-                # Go 模板用 index 函数访问带连字符的网络名（"re-env-net" 不是合法 Go identifier，点语法会解析失败）
-                $ipRaw = (& $Engine inspect $Config.INetSimName --format "{{(index .NetworkSettings.Networks \"$($Config.INetSimNetwork)\").IPAddress}}" 2>$null)
+                # 用 range 遍历网络取 IP，避免 Go 模板内嵌双引号——
+                # PowerShell 调用原生命令时会剥离双引号，导致 "re-env-net" 变成 re-env-net 解析失败。
+                # 容器只连 re-env-net 一个网络，range 会输出该网络的 IP。
+                $ipRaw = (& $Engine inspect $Config.INetSimName --format "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}" 2>$null)
                 # Go 模板在字段缺失时渲染为字面字符串 "null"，必须排除
                 if ($ipRaw -and $ipRaw.Trim() -ne "null") {
                     $inetsimIP = $ipRaw.Trim()
