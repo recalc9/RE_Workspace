@@ -390,6 +390,25 @@ switch ($Command) {
         Write-Log "[+] Starting VM..." "Green"
         # 以 GUI 模式启动虚拟机
         & $Config.VBoxManagePath startvm $Config.VboxVMName --type gui
+
+        # 挂载 transient 共享文件夹（VM 运行时加，关机后自动消失，符合"阅后即焚"语义）。
+        # VM 内需装 VirtualBox Guest Additions，--automount 会自动挂载到可用盘符（通常 Z:、Y:）。
+        # 若没装 Guest Additions，可在 VM 内手动执行：net use Z: \\vboxsvr\re-env-targets
+        $shares = @(
+            @{ Name = "re-env-targets"; Path = (Join-Path $Config.Workspace "windows_targets") },
+            @{ Name = "re-env-output";  Path = (Join-Path $Config.Workspace "output") }
+        )
+        foreach ($s in $shares) {
+            # 确保宿主机目录存在
+            if (-not (Test-Path $s.Path)) { New-Item -ItemType Directory -Path $s.Path -Force | Out-Null }
+            & $Config.VBoxManagePath sharedfolder add $Config.VboxVMName `
+                --name $s.Name --hostpath $s.Path --transient --automount *> $null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Log "[+] 共享文件夹已挂载: $($s.Name) -> $($s.Path)" "Green"
+            } else {
+                Write-Log "[!] 共享文件夹 $($s.Name) 挂载失败（exit=$LASTEXITCODE），请确认 VM 已启动" "Red"
+            }
+        }
     }
 
     # --- 重置 Windows 虚拟机 ---
